@@ -201,6 +201,52 @@ addNodeCard(slide, pres, { title: "Server", ... });
 
 ---
 
+## 13. Negative Line Shape Dimensions (Triggers PowerPoint Repair)
+
+**❌ Bad:**
+```js
+// Drawing a line from (x1,y1) to (x2,y2) — works only when x2>x1 and y2>y1
+slide.addShape(pres.ShapeType.line, {
+  x: x1, y: y1, w: x2 - x1, h: y2 - y1,  // ❌ negative if x2<x1 or y2<y1
+  line: { color: COLORS.border, width: 1 },
+});
+```
+
+**Why it's bad:** pptxgenjs writes `cx`/`cy` directly from `w`/`h`. A negative value produces `<a:ext cx="-2057400"/>` in the OOXML — an invalid dimension that causes PowerPoint to show a **"repair required"** dialog on open.
+
+This is easiest to hit when drawing connection lines between diagram nodes in a loop:
+```js
+lines.forEach(a => {
+  slide.addShape(pres.ShapeType.line, {
+    x: a.x1, y: a.y1,
+    w: a.x2 - a.x1,  // ❌ negative when line goes left (x2 < x1)
+    h: a.y2 - a.y1,  // ❌ negative when line goes up   (y2 < y1)
+  });
+});
+```
+
+**✅ Good:** Always normalize to a positive bounding box + `flipH`/`flipV` for direction:
+```js
+lines.forEach(a => {
+  const x = Math.min(a.x1, a.x2);
+  const y = Math.min(a.y1, a.y2);
+  const w = Math.max(Math.abs(a.x2 - a.x1), 0.01); // 0.01 avoids zero-width
+  const h = Math.max(Math.abs(a.y2 - a.y1), 0.01);
+  const flipH = a.x2 < a.x1;
+  const flipV = a.y2 < a.y1;
+  slide.addShape(pres.ShapeType.line, {
+    x, y, w, h,
+    line: { color: COLORS.border, width: 1 },
+    ...(flipH ? { flipH: true } : {}),
+    ...(flipV ? { flipV: true } : {}),
+  });
+});
+```
+
+**Rule:** Any time you compute `w` or `h` by subtracting two coordinates, guard with `Math.abs()`.
+
+---
+
 ## 12. Not Awaiting `iconToBase64()`
 
 **❌ Bad:**
