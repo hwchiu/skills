@@ -1,14 +1,14 @@
 ---
 title: environment-knowledge skill design
 date: 2026-04-14
-status: approved-for-planning
+status: planning-ready
 ---
 
 # Environment Knowledge Skill Design
 
 ## Problem
 
-Current code analysis can misread system relationships when it lacks environment context. In this repository's target use case, systems are deployed across multiple Kubernetes clusters with different purposes and regional behaviors. Some regions are isolated, while specific regions can act as hubs for cross-region coordination. Without that context, the same code path can be interpreted incorrectly as generic service-to-service logic instead of environment-specific control behavior.
+Current code analysis can misread system relationships when it lacks environment context. In this repository's target use case, systems are deployed across multiple Kubernetes clusters with different purposes and regional behaviors. Some regions are isolated, while specific clusters in specific regions can act as hubs for cross-region coordination. Without that context, the same code path can be interpreted incorrectly as generic service-to-service logic instead of environment-specific control behavior.
 
 The goal of this skill is to provide a reusable environment knowledge layer that analysis workflows can load before reading code, so later reasoning can interpret cluster roles, regional topology, and special connectivity patterns consistently.
 
@@ -42,9 +42,9 @@ The initial target environment model is:
 - cluster purposes such as `production`, `staging`, `dev`, `testing`, and `iot`
 - regional deployment across locations such as US West, US East, Japan, and Singapore
 - most regions behave independently
-- a special US East region can directly connect to other regions and commonly acts as the central coordination point
+- a special cluster in US East can directly connect to other regional clusters and commonly acts as the central coordination point
 
-This design must support that model directly without baking those exact values into the core contract.
+This design must support that model directly without baking those exact values into the core contract. Region IDs may vary by environment as long as they are declared in the environment snapshot region registry.
 
 ## Core Skill Responsibilities
 
@@ -62,15 +62,20 @@ Every environment snapshot described through this skill must use the following c
 
 | Section | Purpose |
 | --- | --- |
+| `cluster-id` | Provides the canonical identifier for a cluster entry within an environment snapshot. |
 | `cluster-role` | Describes the purpose of a cluster, such as `production`, `staging`, `dev`, `testing`, or `iot`. |
-| `region-layout` | Identifies the region where the cluster lives. |
+| `region-layout` | Identifies the region where the cluster lives, including canonical region identity and optional human label. |
 | `topology-class` | Describes the cluster's architectural role, such as standard regional cluster, hub cluster, or other special coordination role. |
 | `inter-region-connectivity` | Explains whether and how the cluster connects to other regions. |
 | `analysis-rules` | States how downstream analysis should interpret this cluster's code and interactions. |
 
-These five sections are the stable contract. Additional narrative can exist around them, but downstream analysis should rely on these sections first.
+These six sections are the stable contract. Additional narrative can exist around them, but downstream analysis should rely on these sections first.
 
 ## Why These Fields
+
+### `cluster-id`
+
+This field gives every cluster entry a stable interface. It allows analysis to refer to clusters unambiguously across environment snapshots, comparisons, and interpretation rules.
 
 ### `cluster-role`
 
@@ -78,7 +83,7 @@ This field encodes operational purpose. It prevents analysis from assuming that 
 
 ### `region-layout`
 
-This field anchors every cluster in a geographic or logical region. It gives later analysis the basis for discussing intra-region and cross-region behavior.
+This field anchors every cluster in a geographic or logical region. It gives later analysis the basis for discussing intra-region and cross-region behavior while preserving a canonical region identifier for validation.
 
 ### `topology-class`
 
@@ -98,9 +103,27 @@ The skill must instruct downstream analysis to apply the following reasoning rul
 
 1. Start with environment semantics before drawing conclusions from code structure alone.
 2. Treat clusters with different `cluster-role` values as potentially different execution contexts, even if the code shape looks similar.
-3. Treat `hub` or equivalent `topology-class` values as higher-probability locations for global coordination, shared control, or cross-region orchestration.
+3. Treat `hub` topology-class values as higher-probability locations for global coordination, shared control, or cross-region orchestration.
 4. Treat isolated regional clusters as local-first by default; cross-region behavior should be interpreted as special-case or explicit coordination logic, not assumed baseline behavior.
 5. When a behavior only appears in one topology class or one cluster role, interpret it first as an environment-specific design choice before assuming it is universally applicable.
+
+## Vocabulary and Precedence Rules
+
+The skill must define explicit precedence between shared rules and per-cluster rules:
+
+1. Global interpretation rules in `SKILL.md` apply to all clusters by default.
+2. Per-cluster `analysis-rules` may refine those defaults for one cluster.
+3. Per-cluster rules must not contradict the core meaning of `cluster-role`, `topology-class`, or `inter-region-connectivity`.
+4. If a per-cluster rule narrows the general rule for a specific cluster, the per-cluster rule wins for that cluster only.
+5. Later project- or service-specific knowledge layers may add implementation detail, but they must not override environment facts established by the environment snapshot. If a later layer appears to conflict with environment semantics, the analysis workflow should flag the conflict and request clarification instead of silently choosing one interpretation.
+
+The taxonomy must also use a controlled-but-extensible vocabulary:
+
+1. `cluster-role` and `topology-class` should prefer terms defined in `cluster-taxonomy.md`.
+2. For v1, `cluster-role`, `topology-class`, connectivity modes, and analysis directives are fixed to the starter values listed in this spec.
+3. For v1, `region-id` values are not globally hardcoded; they must be declared in the environment snapshot region registry.
+4. Future versions may add terms, but only through an explicit taxonomy update and a corresponding spec revision.
+5. Synonyms should be avoided inside snapshots; taxonomy should pick one canonical term and list aliases only as documentation.
 
 ## Skill Structure
 
@@ -119,7 +142,7 @@ Responsibilities:
 
 - define when to use the skill
 - explain the environment interpretation purpose
-- require the five core sections
+- require the six core sections
 - describe the analysis loading order
 - redirect readers to taxonomy and authoring guidance
 
@@ -129,8 +152,41 @@ Responsibilities:
 
 - define allowed and recommended terms for `cluster-role`
 - define allowed and recommended terms for `topology-class`
-- explain how to talk about hub regions, standard regions, and other special regional roles
+- explain how to talk about hub clusters, regional clusters, and other special topology roles
 - keep the vocabulary stable across analyses
+
+Minimum starter taxonomy for v1:
+
+- `cluster-role`: `production`, `staging`, `dev`, `testing`, `iot`
+- `topology-class`: `regional`, `hub`
+- `region-id`: declared in the environment snapshot region registry; `use1`, `usw1`, `jp1`, `sg1` are starter examples
+- `inter-region-connectivity.mode`: `none`, `upstream-hub`, `hub-spoke`, `peer`
+- `analysis-rules` directives:
+  - `interpret-as`: `local-service`, `coordination-entry`, `global-control`, `exceptional-cross-region`
+  - `locality-bias`: `region-first`, `hub-first`, `neutral`
+  - `cross-region-default`: `allow`, `deny`
+
+Source-of-truth ownership for v1:
+
+| Value family | Owning file |
+| --- | --- |
+| `cluster-role` values | `cluster-taxonomy.md` |
+| `topology-class` values | `cluster-taxonomy.md` |
+| `region-id` registry | environment snapshot |
+| `inter-region-connectivity.mode` values | `cluster-taxonomy.md` |
+| `analysis-rules` directive names and allowed values | `cluster-taxonomy.md` |
+| loading order, precedence, stop behavior | `SKILL.md` |
+| snapshot syntax | `authoring-template.md` |
+
+`cluster-role` semantics for v1:
+
+| cluster-role | Meaning for downstream analysis |
+| --- | --- |
+| `production` | default to stable, live, and operationally critical behavior |
+| `staging` | default to pre-release validation and production-like testing behavior |
+| `dev` | default to developer-oriented or iterative behavior; avoid assuming production guarantees |
+| `testing` | default to validation, synthetic execution, or non-user-facing control behavior |
+| `iot` | default to edge- or device-oriented behavior, often more constrained and environment-specific |
 
 ### `authoring-template.md`
 
@@ -150,15 +206,151 @@ The authoring template should follow this shape:
 ```md
 ## Environment Snapshot
 
-### Cluster: {name}
+### Region Registry
+- {region-id}: {region-label}
+
+### Cluster: {cluster-id}
+- cluster-id:
 - cluster-role:
 - region-layout:
+  - region-id:
+  - region-label:
 - topology-class:
 - inter-region-connectivity:
+  - mode:
+  - targets:
+    - {cluster-id}
+  - notes:
 - analysis-rules:
+  - interpret-as:
+  - locality-bias:
+  - cross-region-default:
 ```
 
 Multiple cluster entries can be listed in one snapshot. The important constraint is that every cluster uses the same contract so downstream analysis can compare them consistently.
+
+## Snapshot Delivery Interface
+
+For v1, the environment snapshot is not stored inside the reusable skill directory. Instead, it is supplied at analysis time in one of two supported forms:
+
+1. an inline markdown block in the user request or working notes
+2. a standalone markdown file that follows `authoring-template.md` and is explicitly loaded alongside the skill
+
+`SKILL.md` must instruct the analysis workflow to read that snapshot immediately after loading the skill and before loading project- or service-specific knowledge.
+
+This keeps the reusable skill generic while still giving downstream analysis a concrete, repeatable input interface.
+
+For v1, "explicitly loaded alongside the skill" means the analysis prompt must either paste the snapshot inline or provide the exact markdown file path and load that file before continuing. Implicit discovery of candidate snapshot files is out of scope.
+
+Snapshot precedence for v1:
+
+1. count authoritative inline snapshots
+2. count authoritative snapshot files
+3. if total authoritative snapshots across both sources is `0`, stop and ask for one before analysis continues
+4. if total authoritative snapshots across both sources is `1`, use it
+5. if total authoritative snapshots across both sources is greater than `1`, stop and ask the user which one is authoritative
+
+Authoritative inline snapshot detection for v1:
+
+1. its first non-empty line must be a top-level heading exactly equal to `## Environment Snapshot`
+2. it must not appear inside a fenced code block
+3. it must not appear under a section whose heading includes `Example`, `Draft`, or `Invalid`
+4. if more than one block satisfies these rules, analysis must stop and ask the user which block is authoritative
+
+Authoritative file snapshot detection for v1:
+
+1. the file's first non-empty line must be a top-level heading exactly equal to `## Environment Snapshot`
+2. the file must not contain additional `## Environment Snapshot` headings under `Example`, `Draft`, or `Invalid`
+3. if more than one provided file satisfies these rules, analysis must stop and ask the user which file is authoritative
+
+The runtime ownership boundary is:
+
+- `SKILL.md` defines loading order, stopping behavior, and conflict escalation
+- `cluster-taxonomy.md` defines all canonical value vocabularies
+- `authoring-template.md` defines the exact snapshot syntax
+
+Cluster-to-code binding is intentionally out of scope for this skill. Later project- or service-specific knowledge layers are responsible for stating which codebase, service, or subsystem maps to which `cluster-id` values. The environment skill only defines the cluster semantics that those later layers can reference.
+
+## Minimal Snapshot Grammar
+
+To keep authoring consistent, the skill implementation should define this minimum grammar:
+
+- `cluster-id`: lowercase kebab-case unique identifier inside the snapshot, for example `use1-prod-hub`
+- `cluster-role`: single canonical value from taxonomy
+- `region-layout`: a structured field using:
+  - `region-id`: canonical region identifier, for example `use1`
+  - `region-label`: optional human-readable name; if present, it must match the label declared for that `region-id` in the `### Region Registry`
+- `topology-class`: single canonical value from taxonomy
+- `inter-region-connectivity`: a structured list using:
+  - `mode`: one of `none`, `upstream-hub`, `hub-spoke`, `peer`
+  - `targets`: a markdown bullet list of target `cluster-id` values declared in the same snapshot
+  - `notes`: optional short explanation of why the connection exists
+- `analysis-rules`: a markdown bullet list of fixed directives using:
+  - `interpret-as`
+  - `locality-bias`
+  - `cross-region-default`
+
+This grammar is still markdown-friendly, but it is constrained enough for repeatable authoring and future validation.
+
+Exact syntax conventions for v1:
+
+- `targets` must be written as nested markdown bullets, one target per line
+- `analysis-rules` must be written as nested markdown bullets, one directive per line
+- comma-separated target lists are invalid
+- paragraph-form `analysis-rules` are invalid
+- unknown directives or directive values are invalid
+
+## Strict v1 Schema Decisions
+
+Because v1 is intentionally strict, the following rules are part of the core contract:
+
+1. `region-layout.region-id` must come from the `### Region Registry` block in the same environment snapshot.
+2. `### Cluster: <value>` must exactly match `cluster-id`.
+3. `inter-region-connectivity.mode` semantics are fixed:
+   - `none`: no cross-region connectivity; `targets` must be empty or omitted
+   - `upstream-hub`: regional cluster connects to exactly one hub cluster
+   - `hub-spoke`: hub cluster connects to one or more explicitly named spoke clusters
+   - `peer`: cluster connects to one or more explicitly named peer clusters; reciprocity is never implied
+4. `analysis-rules` must be treated as structured directives, not narrative guidance.
+5. Later analysis must treat directive values as configuration.
+6. Connectivity declarations are one-way by default; reciprocity is optional.
+7. If both sides declare the same relationship, only these reciprocal combinations are valid:
+   - `upstream-hub` on the spoke side with `hub-spoke` on the hub side
+   - `peer` on both sides
+8. Every cluster entry must provide all three `analysis-rules` directives exactly once.
+
+## Analysis Directive Semantics
+
+`analysis-rules` must use the following meanings:
+
+| Directive | Allowed values | Meaning for downstream analysis |
+| --- | --- | --- |
+| `interpret-as` | `local-service`, `coordination-entry`, `global-control`, `exceptional-cross-region` | Primary interpretation lens for the cluster's code and network interactions. |
+| `locality-bias` | `region-first`, `hub-first`, `neutral` | Tells analysis whether to prefer local-region explanations, hub-mediated explanations, or neither when multiple readings are possible. |
+| `cross-region-default` | `allow`, `deny` | Tells analysis whether cross-region behavior should be considered expected baseline behavior or treated as an exception requiring explicit evidence. |
+
+Interpretation details:
+
+- `local-service`: default to region-local service behavior
+- `coordination-entry`: default to control ingress or orchestration entry behavior
+- `global-control`: default to system-wide coordination responsibility
+- `exceptional-cross-region`: treat cross-region behavior as rare and special-case
+- `region-first`: prefer explanations that stay inside the current region
+- `hub-first`: prefer explanations that route through a hub cluster
+- `neutral`: do not prefer regional or hub-mediated explanations without more evidence
+- `allow`: cross-region behavior may be baseline for this cluster
+- `deny`: cross-region behavior must be justified by explicit references or topology evidence
+
+Compatibility rules for directive values:
+
+| topology-class | connectivity mode | allowed `interpret-as` | allowed `locality-bias` | allowed `cross-region-default` |
+| --- | --- | --- | --- | --- |
+| `regional` | `none` | `local-service` | `region-first`, `neutral` | `deny` |
+| `regional` | `upstream-hub` | `local-service`, `exceptional-cross-region` | `region-first`, `neutral` | `deny` |
+| `regional` | `peer` | `local-service`, `exceptional-cross-region` | `region-first`, `neutral` | `deny`, `allow` |
+| `hub` | `none` | `global-control`, `coordination-entry` | `hub-first`, `neutral` | `deny`, `allow` |
+| `hub` | `hub-spoke` | `coordination-entry`, `global-control` | `hub-first`, `neutral` | `allow` |
+| `hub` | `peer` | `coordination-entry`, `global-control` | `hub-first`, `neutral` | `allow`, `deny` |
 
 ## Analysis Workflow
 
@@ -185,7 +377,91 @@ If an analysis needs those details, it should load another knowledge layer after
 
 ## Handling Missing Information
 
-If an environment snapshot is incomplete, the skill should instruct the analysis workflow to ask for the missing fields instead of guessing. Missing `topology-class`, `inter-region-connectivity`, or `analysis-rules` must be treated as blocking gaps for accurate interpretation.
+If an environment snapshot is incomplete, the skill should instruct the analysis workflow to ask for the missing fields instead of guessing. Missing `cluster-role`, `topology-class`, `inter-region-connectivity`, or `analysis-rules` must be treated as blocking gaps for accurate interpretation.
+
+Missing `cluster-id`, `region-layout`, or the snapshot `### Region Registry` must also be treated as blocking because analysis cannot anchor cluster references consistently without them.
+
+## Validation Rules
+
+The implementation plan must include validation for malformed snapshots:
+
+1. reject duplicate `cluster-id` values inside one snapshot
+2. reject missing `cluster-id`
+3. reject missing `cluster-role`
+4. reject missing `topology-class`
+5. reject missing `inter-region-connectivity`
+6. reject missing `inter-region-connectivity.mode`
+7. reject missing `region-layout.region-id` values
+8. reject `region-layout.region-id` values not declared in the snapshot `### Region Registry`
+9. reject `cluster-role` or `topology-class` values not defined in `cluster-taxonomy.md`
+10. reject unknown `inter-region-connectivity.mode` values
+11. reject `inter-region-connectivity.targets` values that do not match a declared `cluster-id`
+12. reject duplicate targets in `inter-region-connectivity.targets`
+13. reject empty `analysis-rules` lists
+14. reject mixed synonym usage when a canonical taxonomy term already exists
+15. require `targets` to be omitted or empty when `mode` is `none`
+16. require exactly one target when `mode` is `upstream-hub`
+17. require at least one target when `mode` is `hub-spoke` or `peer`
+18. reject `upstream-hub` on clusters whose `topology-class` is not `regional`
+19. reject `hub-spoke` on clusters whose `topology-class` is not `hub`
+20. reject missing or unknown `analysis-rules` directives
+21. reject missing or unknown `analysis-rules` directive values
+22. reject a `### Cluster:` heading that does not match `cluster-id`
+23. require the single `upstream-hub` target to reference a cluster whose `topology-class` is `hub`
+24. reject `hub-spoke` targets that reference clusters whose `topology-class` is also `hub`
+25. reject duplicate core fields inside a single cluster entry
+26. reject duplicate `analysis-rules` directives inside a single cluster entry
+27. reject unknown fields inside a cluster entry
+28. reject self-targeting entries in `inter-region-connectivity.targets`
+29. reject any `analysis-rules` value combination not allowed by the compatibility matrix in this spec
+30. reject reciprocally declared links whose modes are not one of the valid reciprocal combinations defined in this spec
+31. reject snapshots with zero cluster entries
+32. reject `cluster-id` values that are not lowercase kebab-case
+33. reject region registry entries whose `region-id` keys are duplicated or malformed
+34. require `interpret-as`, `locality-bias`, and `cross-region-default` to appear exactly once per cluster entry
+35. reject `region-layout.region-label` values that do not match the label declared for the same `region-id` in the region registry
+
+These should be surfaced as explicit authoring errors, not silently normalized.
+
+Validation ownership for v1 is procedural rather than tool-based:
+
+- `SKILL.md` owns the validation checklist and tells the analysis workflow when to stop on malformed input
+- `cluster-taxonomy.md` owns the canonical allowed values
+- `authoring-template.md` owns the exact markdown shape that authors must follow
+
+The implementation should not introduce a separate validator tool in v1 unless later planning finds that manual validation in the skill instructions is insufficient.
+
+Validation failure output for v1 must use this shape:
+
+```md
+Environment snapshot invalid
+
+- [snapshot] missing region registry
+- [cluster-id: <value>] <specific error>
+- [snapshot] missing cluster-id for one cluster entry
+- [cluster-id: <value>] <specific error>
+```
+
+After emitting this error block, the analysis workflow must stop and request a corrected snapshot. It must not continue into project- or code-level interpretation.
+
+Authoritative snapshot selection failure for v1 must use this shape:
+
+```md
+Environment snapshot selection required
+
+- no authoritative snapshot was found
+```
+
+or
+
+```md
+Environment snapshot selection required
+
+- multiple authoritative snapshots were found
+- specify which snapshot is authoritative before analysis continues
+```
+
+Narrative text or comments may appear after `## Environment Snapshot`, but for an authoritative snapshot the first non-empty line must be the `## Environment Snapshot` heading. Once a cluster entry starts, only the defined schema fields are allowed until the next `### Cluster:` heading or the end of the snapshot.
 
 ## Example Semantics
 
@@ -193,10 +469,94 @@ For the motivating example described during design:
 
 - clusters may have roles such as `production`, `staging`, `dev`, `testing`, and `iot`
 - most regions should be treated as independent regional units
-- US East should be representable as a `hub` or equivalent topology class
+- a designated US East cluster should be representable as `topology-class: hub`
 - downstream analysis should treat US East-hosted cross-region behaviors as likely coordination logic rather than as generic peer-to-peer behavior
 
 These are examples of how the contract is used, not hardcoded universal rules.
+
+## Worked Example
+
+```md
+## Environment Snapshot
+
+### Region Registry
+- use1: US East
+- jp1: Japan
+- usw1: US West
+- sg1: Singapore
+
+### Cluster: use1-prod-hub
+- cluster-id: use1-prod-hub
+- cluster-role: production
+- region-layout:
+  - region-id: use1
+  - region-label: US East
+- topology-class: hub
+- inter-region-connectivity:
+  - mode: hub-spoke
+  - targets:
+    - usw1-prod
+    - jp1-prod
+    - sg1-prod
+  - notes: central coordination entry point for cross-region control traffic
+- analysis-rules:
+  - interpret-as: coordination-entry
+  - locality-bias: hub-first
+  - cross-region-default: allow
+
+### Cluster: jp1-prod
+- cluster-id: jp1-prod
+- cluster-role: production
+- region-layout:
+  - region-id: jp1
+  - region-label: Japan
+- topology-class: regional
+- inter-region-connectivity:
+  - mode: upstream-hub
+  - targets:
+    - use1-prod-hub
+  - notes: only approved path is to the hub region
+- analysis-rules:
+  - interpret-as: local-service
+  - locality-bias: region-first
+  - cross-region-default: deny
+
+### Cluster: usw1-prod
+- cluster-id: usw1-prod
+- cluster-role: production
+- region-layout:
+  - region-id: usw1
+  - region-label: US West
+- topology-class: regional
+- inter-region-connectivity:
+  - mode: upstream-hub
+  - targets:
+    - use1-prod-hub
+  - notes: only approved path is to the hub region
+- analysis-rules:
+  - interpret-as: local-service
+  - locality-bias: region-first
+  - cross-region-default: deny
+
+### Cluster: sg1-prod
+- cluster-id: sg1-prod
+- cluster-role: production
+- region-layout:
+  - region-id: sg1
+  - region-label: Singapore
+- topology-class: regional
+- inter-region-connectivity:
+  - mode: upstream-hub
+  - targets:
+    - use1-prod-hub
+  - notes: only approved path is to the hub region
+- analysis-rules:
+  - interpret-as: exceptional-cross-region
+  - locality-bias: region-first
+  - cross-region-default: deny
+```
+
+This example shows how a hub region and a standard regional cluster can be expressed without introducing any project-specific deployment detail.
 
 ## Rationale for a Generic Skill
 
