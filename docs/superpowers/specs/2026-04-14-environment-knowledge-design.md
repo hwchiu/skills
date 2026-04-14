@@ -233,41 +233,34 @@ Multiple cluster entries can be listed in one snapshot. The important constraint
 
 For v1, the environment snapshot is not stored inside the reusable skill directory. Instead, it is supplied at analysis time in one of two supported forms:
 
-1. an inline markdown block in the user request or working notes
-2. a standalone markdown file that follows `authoring-template.md` and is explicitly loaded alongside the skill
+1. an inline markdown block in the current analysis task input
+2. one or more markdown file paths that follow `authoring-template.md` and are explicitly loaded alongside the skill
 
 `SKILL.md` must instruct the analysis workflow to read that snapshot immediately after loading the skill and before loading project- or service-specific knowledge.
 
-This keeps the reusable skill generic while still giving downstream analysis a concrete, repeatable input interface.
+This keeps the reusable skill generic while still giving downstream analysis a concrete input interface.
 
 For v1, "explicitly loaded alongside the skill" means the analysis prompt must either paste the snapshot inline or provide the exact markdown file path and load that file before continuing. Implicit discovery of candidate snapshot files is out of scope.
 
-Snapshot precedence for v1:
+The precise rules for:
 
-1. count authoritative inline snapshots
-2. count authoritative snapshot files
-3. if total authoritative snapshots across both sources is `0`, stop and ask for one before analysis continues
-4. if total authoritative snapshots across both sources is `1`, use it
-5. if total authoritative snapshots across both sources is greater than `1`, stop and ask the user which one is authoritative
+- authoritative snapshot selection
+- inline vs file precedence
+- region registry grammar
+- strict validation rules
+- failure output shapes
+- later-layer conflict escalation behavior
 
-Authoritative inline snapshot detection for v1:
+are defined in the companion spec:
 
-1. its first non-empty line must be a top-level heading exactly equal to `## Environment Snapshot`
-2. it must not appear inside a fenced code block
-3. it must not appear under a section whose heading includes `Example`, `Draft`, or `Invalid`
-4. if more than one block satisfies these rules, analysis must stop and ask the user which block is authoritative
-
-Authoritative file snapshot detection for v1:
-
-1. the file's first non-empty line must be a top-level heading exactly equal to `## Environment Snapshot`
-2. the file must not contain additional `## Environment Snapshot` headings under `Example`, `Draft`, or `Invalid`
-3. if more than one provided file satisfies these rules, analysis must stop and ask the user which file is authoritative
+`docs/superpowers/specs/2026-04-14-environment-snapshot-protocol-design.md`
 
 The runtime ownership boundary is:
 
-- `SKILL.md` defines loading order, stopping behavior, and conflict escalation
+- `SKILL.md` defines loading order and runtime stop behavior
 - `cluster-taxonomy.md` defines all canonical value vocabularies
 - `authoring-template.md` defines the exact snapshot syntax
+- the companion protocol is a repository design artifact, not a fourth shipped skill file; it normatively defines selection, validation, and conflict rules that must be reflected in `SKILL.md` and `authoring-template.md` during implementation
 
 Cluster-to-code binding is intentionally out of scope for this skill. Later project- or service-specific knowledge layers are responsible for stating which codebase, service, or subsystem maps to which `cluster-id` values. The environment skill only defines the cluster semantics that those later layers can reference.
 
@@ -300,24 +293,13 @@ Exact syntax conventions for v1:
 - paragraph-form `analysis-rules` are invalid
 - unknown directives or directive values are invalid
 
-## Strict v1 Schema Decisions
+## Companion Protocol Boundary
 
-Because v1 is intentionally strict, the following rules are part of the core contract:
+This design intentionally separates the reusable skill contract from the snapshot protocol:
 
-1. `region-layout.region-id` must come from the `### Region Registry` block in the same environment snapshot.
-2. `### Cluster: <value>` must exactly match `cluster-id`.
-3. `inter-region-connectivity.mode` semantics are fixed:
-   - `none`: no cross-region connectivity; `targets` must be empty or omitted
-   - `upstream-hub`: regional cluster connects to exactly one hub cluster
-   - `hub-spoke`: hub cluster connects to one or more explicitly named spoke clusters
-   - `peer`: cluster connects to one or more explicitly named peer clusters; reciprocity is never implied
-4. `analysis-rules` must be treated as structured directives, not narrative guidance.
-5. Later analysis must treat directive values as configuration.
-6. Connectivity declarations are one-way by default; reciprocity is optional.
-7. If both sides declare the same relationship, only these reciprocal combinations are valid:
-   - `upstream-hub` on the spoke side with `hub-spoke` on the hub side
-   - `peer` on both sides
-8. Every cluster entry must provide all three `analysis-rules` directives exactly once.
+1. This document defines **what environment knowledge means** and what fields the skill requires.
+2. The companion protocol defines **how an environment snapshot is selected, parsed, validated, and rejected**.
+3. The reusable skill files should reference the protocol, but the protocol itself is a separate design artifact so validation complexity does not bloat the core skill specification.
 
 ## Analysis Directive Semantics
 
@@ -341,6 +323,8 @@ Interpretation details:
 - `allow`: cross-region behavior may be baseline for this cluster
 - `deny`: cross-region behavior must be justified by explicit references or topology evidence
 
+These directives refine how analysis interprets behavior. They do not override topology facts, cluster roles, or connectivity declarations.
+
 Compatibility rules for directive values:
 
 | topology-class | connectivity mode | allowed `interpret-as` | allowed `locality-bias` | allowed `cross-region-default` |
@@ -348,7 +332,7 @@ Compatibility rules for directive values:
 | `regional` | `none` | `local-service` | `region-first`, `neutral` | `deny` |
 | `regional` | `upstream-hub` | `local-service`, `exceptional-cross-region` | `region-first`, `neutral` | `deny` |
 | `regional` | `peer` | `local-service`, `exceptional-cross-region` | `region-first`, `neutral` | `deny`, `allow` |
-| `hub` | `none` | `global-control`, `coordination-entry` | `hub-first`, `neutral` | `deny`, `allow` |
+| `hub` | `none` | `global-control`, `coordination-entry` | `hub-first`, `neutral` | `deny` |
 | `hub` | `hub-spoke` | `coordination-entry`, `global-control` | `hub-first`, `neutral` | `allow` |
 | `hub` | `peer` | `coordination-entry`, `global-control` | `hub-first`, `neutral` | `allow`, `deny` |
 
@@ -381,87 +365,7 @@ If an environment snapshot is incomplete, the skill should instruct the analysis
 
 Missing `cluster-id`, `region-layout`, or the snapshot `### Region Registry` must also be treated as blocking because analysis cannot anchor cluster references consistently without them.
 
-## Validation Rules
-
-The implementation plan must include validation for malformed snapshots:
-
-1. reject duplicate `cluster-id` values inside one snapshot
-2. reject missing `cluster-id`
-3. reject missing `cluster-role`
-4. reject missing `topology-class`
-5. reject missing `inter-region-connectivity`
-6. reject missing `inter-region-connectivity.mode`
-7. reject missing `region-layout.region-id` values
-8. reject `region-layout.region-id` values not declared in the snapshot `### Region Registry`
-9. reject `cluster-role` or `topology-class` values not defined in `cluster-taxonomy.md`
-10. reject unknown `inter-region-connectivity.mode` values
-11. reject `inter-region-connectivity.targets` values that do not match a declared `cluster-id`
-12. reject duplicate targets in `inter-region-connectivity.targets`
-13. reject empty `analysis-rules` lists
-14. reject mixed synonym usage when a canonical taxonomy term already exists
-15. require `targets` to be omitted or empty when `mode` is `none`
-16. require exactly one target when `mode` is `upstream-hub`
-17. require at least one target when `mode` is `hub-spoke` or `peer`
-18. reject `upstream-hub` on clusters whose `topology-class` is not `regional`
-19. reject `hub-spoke` on clusters whose `topology-class` is not `hub`
-20. reject missing or unknown `analysis-rules` directives
-21. reject missing or unknown `analysis-rules` directive values
-22. reject a `### Cluster:` heading that does not match `cluster-id`
-23. require the single `upstream-hub` target to reference a cluster whose `topology-class` is `hub`
-24. reject `hub-spoke` targets that reference clusters whose `topology-class` is also `hub`
-25. reject duplicate core fields inside a single cluster entry
-26. reject duplicate `analysis-rules` directives inside a single cluster entry
-27. reject unknown fields inside a cluster entry
-28. reject self-targeting entries in `inter-region-connectivity.targets`
-29. reject any `analysis-rules` value combination not allowed by the compatibility matrix in this spec
-30. reject reciprocally declared links whose modes are not one of the valid reciprocal combinations defined in this spec
-31. reject snapshots with zero cluster entries
-32. reject `cluster-id` values that are not lowercase kebab-case
-33. reject region registry entries whose `region-id` keys are duplicated or malformed
-34. require `interpret-as`, `locality-bias`, and `cross-region-default` to appear exactly once per cluster entry
-35. reject `region-layout.region-label` values that do not match the label declared for the same `region-id` in the region registry
-
-These should be surfaced as explicit authoring errors, not silently normalized.
-
-Validation ownership for v1 is procedural rather than tool-based:
-
-- `SKILL.md` owns the validation checklist and tells the analysis workflow when to stop on malformed input
-- `cluster-taxonomy.md` owns the canonical allowed values
-- `authoring-template.md` owns the exact markdown shape that authors must follow
-
-The implementation should not introduce a separate validator tool in v1 unless later planning finds that manual validation in the skill instructions is insufficient.
-
-Validation failure output for v1 must use this shape:
-
-```md
-Environment snapshot invalid
-
-- [snapshot] missing region registry
-- [cluster-id: <value>] <specific error>
-- [snapshot] missing cluster-id for one cluster entry
-- [cluster-id: <value>] <specific error>
-```
-
-After emitting this error block, the analysis workflow must stop and request a corrected snapshot. It must not continue into project- or code-level interpretation.
-
-Authoritative snapshot selection failure for v1 must use this shape:
-
-```md
-Environment snapshot selection required
-
-- no authoritative snapshot was found
-```
-
-or
-
-```md
-Environment snapshot selection required
-
-- multiple authoritative snapshots were found
-- specify which snapshot is authoritative before analysis continues
-```
-
-Narrative text or comments may appear after `## Environment Snapshot`, but for an authoritative snapshot the first non-empty line must be the `## Environment Snapshot` heading. Once a cluster entry starts, only the defined schema fields are allowed until the next `### Cluster:` heading or the end of the snapshot.
+Detailed validation rules, selection rules, and error output shapes are intentionally moved to the companion protocol spec so the core skill spec remains focused on environment semantics instead of parser behavior.
 
 ## Example Semantics
 
@@ -587,7 +491,8 @@ The implementation plan should cover:
 2. writing the reusable skill instructions in `SKILL.md`
 3. defining the vocabulary contract in `cluster-taxonomy.md`
 4. writing the snapshot template in `authoring-template.md`
-5. validating that the skill is understandable and internally consistent when read on its own
+5. aligning the skill files with the companion snapshot protocol spec
+6. validating that the skill is understandable and internally consistent when read together with the companion protocol
 
 ## Final Recommendation
 
